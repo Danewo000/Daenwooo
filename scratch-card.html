@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>泡泡刮刮乐</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0a0a0a;
+    color: #fff;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; justify-content: center;
+    gap: 16px; padding: 14px 20px;
+    background: #141414; border-bottom: 1px solid #2a2a2a;
+    flex-shrink: 0; z-index: 10;
+  }
+  h1 { font-size: 18px; font-weight: 600; }
+  .btn {
+    padding: 8px 18px; border: none; border-radius: 6px;
+    font-size: 13px; cursor: pointer;
+    transition: background .2s, transform .1s;
+  }
+  .btn:active { transform: scale(.96); }
+  .btn-upload { background: #3b82f6; color: #fff; }
+  .btn-upload:hover { background: #2563eb; }
+  .btn-reset { background: #333; color: #ddd; }
+  .btn-reset:hover { background: #444; }
+  #fileInput { display: none; }
+  main {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    position: relative; overflow: hidden;
+  }
+  #wrapper {
+    width: 700px; height: 350px;
+    border-radius: 40px; overflow: hidden;
+    box-shadow: 0 8px 40px rgba(0,0,0,.4);
+    background: #f0e4d4; position: relative;
+    padding: 32px 32px 32px 50px;
+    display: flex; align-items: center; justify-content: flex-start;
+    flex-shrink: 0;
+  }
+  #canvasWrap {
+    border-radius: 50%; overflow: hidden;
+    flex-shrink: 0;
+  }
+  #copyText {
+    flex: 1;
+    padding-left: 32px;
+    font-size: 20px;
+    font-weight: 600;
+    color: #5a4a3a;
+    line-height: 1.6;
+    letter-spacing: 1px;
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity .6s ease, transform .6s ease;
+  }
+  #copyText.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  canvas { display: block; cursor: none; }
+  #cursor {
+    position: absolute; pointer-events: none;
+    border: 2px solid rgba(255,255,255,.35);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    display: none;
+  }
+  #info {
+    position: absolute; bottom: 18px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 13px; color: #666; pointer-events: none;
+  }
+  #uploadHint {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center; color: #555; pointer-events: none;
+  }
+  #uploadHint .icon { font-size: 48px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>泡泡刮刮乐</h1>
+  <label class="btn btn-upload" for="fileInput">上传图片</label>
+  <input type="file" id="fileInput" accept="image/*">
+  <button class="btn btn-reset" id="resetBtn">重置</button>
+</header>
+<main>
+  <div id="uploadHint"><div class="icon">🫧</div><p>上传一张图片，鼠标划过揭开</p></div>
+  <div id="wrapper">
+    <div id="canvasWrap">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div id="copyText"></div>
+    <div id="cursor"></div>
+  </div>
+  <div id="info"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  const canvas  = document.getElementById("canvas");
+  const ctx     = canvas.getContext("2d");
+  const wrapper = document.getElementById("wrapper");
+  const canvasWrap = document.getElementById("canvasWrap");
+  const copyText   = document.getElementById("copyText");
+  const cursor  = document.getElementById("cursor");
+  const info    = document.getElementById("info");
+  const hint    = document.getElementById("uploadHint");
+  const fileIn  = document.getElementById("fileInput");
+  const resetBtn = document.getElementById("resetBtn");
+
+  const SPLIT_RADIUS = 80;   // px from cursor to trigger split
+  const MIN_R        = 3;    // bubble radius below this → remove
+  const FADE_MS      = 300;
+  const MAX_CANVAS   = 286;  // fit inside wrapper (350 - 32*2 padding)
+
+  let img = null, imgW = 0, imgH = 0, side = 0, imgOffX = 0, imgOffY = 0;
+  let imageData = null;
+  let blocks = [];
+  let mouse  = { x: -999, y: -999, on: false };
+  let active = false;
+  let animating = false;
+
+  /* ── average colour of a rectangular region from image data ── */
+  function avgColor(x, y, w, h) {
+    const sx = Math.max(0, Math.floor(x));
+    const sy = Math.max(0, Math.floor(y));
+    const ex = Math.min(side, Math.ceil(x + w));
+    const ey = Math.min(side, Math.ceil(y + h));
+    const d = imageData.data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let py = sy; py < ey; py++) {
+      for (let px = sx; px < ex; px++) {
+        const i = (py * side + px) * 4;
+        r += d[i]; g += d[i+1]; b += d[i+2];
+        n++;
+      }
+    }
+    return n ? `rgb(${(r/n)|0},${(g/n)|0},${(b/n)|0})` : "#000";
+  }
+
+  /* ── render ── */
+  function render() {
+    ctx.clearRect(0, 0, side, side);
+    // draw image clipped to circle
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(side / 2, side / 2, side / 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(img, imgOffX, imgOffY, imgW, imgH);
+    ctx.restore();
+    // draw bubbles
+    for (const b of blocks) {
+      if (b.a <= 0) continue;
+      const cx = b.x + b.w / 2;
+      const cy = b.y + b.h / 2;
+      const r  = Math.min(b.w, b.h) / 2;
+      ctx.globalAlpha = b.a;
+      ctx.fillStyle   = b.color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /* ── info display ── */
+  function updateInfo() {
+    if (!active) { info.textContent = ""; return; }
+    let covered = 0;
+    for (const b of blocks) if (b.a > 0) covered += Math.PI * Math.pow(Math.min(b.w, b.h) / 2, 2);
+    const circleArea = Math.PI * Math.pow(side / 2, 2);
+    const revealed = Math.max(0, Math.round((1 - covered / circleArea) * 100));
+    info.textContent = `泡泡数: ${blocks.filter(b=>b.a>0).length}  ·  已揭示: ${revealed}%`;
+  }
+
+  /* ── image load ── */
+  fileIn.addEventListener("change", e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      img = new Image();
+      img.onload = () => initGame();
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(f);
+  });
+
+  function initGame() {
+    hint.style.display = "none";
+    const vw = window.innerWidth - 40;
+    const vh = window.innerHeight - 140;
+    const maxDim = Math.max(img.naturalWidth, img.naturalHeight);
+    const s = Math.min(MAX_CANVAS / maxDim, vw / maxDim, vh / maxDim, 1);
+    imgW = Math.round(img.naturalWidth * s);
+    imgH = Math.round(img.naturalHeight * s);
+    side = Math.max(imgW, imgH);
+    imgOffX = (side - imgW) / 2;
+    imgOffY = (side - imgH) / 2;
+
+    canvas.width  = side;
+    canvas.height = side;
+    canvasWrap.style.width  = side + "px";
+    canvasWrap.style.height = side + "px";
+
+    // sample image pixels (full square canvas, image centred)
+    const tmpCanvas = document.createElement("canvas");
+    tmpCanvas.width = side; tmpCanvas.height = side;
+    const tmpCtx = tmpCanvas.getContext("2d");
+    tmpCtx.drawImage(img, imgOffX, imgOffY, imgW, imgH);
+    imageData = tmpCtx.getImageData(0, 0, side, side);
+
+    resetBlocks();
+    active = true;
+    cursor.style.width = cursor.style.height = SPLIT_RADIUS * 2 + "px";
+
+    // show copy text after bubble appears
+    setTimeout(() => copyText.classList.add("show"), 200);
+  }
+
+  function resetBlocks() {
+    blocks = [{
+      x: 0, y: 0, w: side, h: side,
+      color: "#000", a: 1
+    }];
+    animating = false;
+    render();
+    updateInfo();
+  }
+
+  resetBtn.addEventListener("click", () => {
+    if (!img) return;
+    resetBlocks();
+    // re-roll copy text
+    copyText.classList.remove("show");
+    setTimeout(() => {
+      copyText.textContent = copies[Math.floor(Math.random() * copies.length)];
+      copyText.classList.add("show");
+    }, 200);
+  });
+
+  /* ── split blocks near cursor — each tick splits all nearby bubbles into 2×2 ── */
+  function splitNearCursor() {
+    if (!mouse.on || animating || !active) return;
+
+    const next = [];
+    let didSplit = false;
+
+    for (const b of blocks) {
+      if (b.a <= 0) { next.push(b); continue; }
+
+      const bCx = b.x + b.w / 2;
+      const bCy = b.y + b.h / 2;
+      const bR  = Math.min(b.w, b.h) / 2;
+
+      const dist = Math.hypot(mouse.x - bCx, mouse.y - bCy);
+      if (dist < bR + SPLIT_RADIUS && bR > MIN_R * 2) {
+        // always split into 2×2 = 4 pieces
+        const hw = b.w / 2, hh = b.h / 2;
+        for (let dr = 0; dr < 2; dr++) {
+          for (let dc = 0; dc < 2; dc++) {
+            const nx = b.x + dc * hw;
+            const ny = b.y + dr * hh;
+            next.push({
+              x: nx, y: ny, w: hw, h: hh,
+              color: avgColor(nx, ny, hw, hh), a: 1
+            });
+          }
+        }
+        didSplit = true;
+      } else {
+        next.push(b);
+      }
+    }
+
+    blocks = next;
+
+    // remove tiny bubbles
+    let fadeCount = 0;
+    for (const b of blocks) {
+      if (b.a > 0 && Math.min(b.w, b.h) / 2 < MIN_R) {
+        b._fade = true; fadeCount++;
+      }
+    }
+
+    if (fadeCount > 0 && !animating) {
+      animating = true;
+      const t0 = performance.now();
+      (function tick(now) {
+        const t = Math.min((now - t0) / FADE_MS, 1);
+        for (const b of blocks) if (b._fade) b.a = 1 - t;
+        render(); updateInfo();
+        if (t < 1) return requestAnimationFrame(tick);
+        blocks = blocks.filter(b => !(b._fade && b.a <= 0));
+        animating = false; updateInfo();
+      })(t0);
+    } else if (didSplit) {
+      render(); updateInfo();
+    }
+  }
+
+  /* ── mouse tracking ── */
+  canvasWrap.addEventListener("mouseenter", () => { mouse.on = true; cursor.style.display = "block"; });
+  canvasWrap.addEventListener("mouseleave", () => { mouse.on = false; cursor.style.display = "none"; });
+  canvasWrap.addEventListener("mousemove", e => {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = e.clientX - r.left;
+    mouse.y = e.clientY - r.top;
+    cursor.style.left = e.clientX - wrapper.getBoundingClientRect().left + "px";
+    cursor.style.top  = e.clientY - wrapper.getBoundingClientRect().top  + "px";
+  });
+
+  /* ── random copy text ── */
+  const copies = [
+    "用泡泡\n揭开一个秘密",
+    "每一颗泡泡\n都藏着色彩",
+    "慢慢划\n别着急",
+    "泡泡碎了\n画面就来了",
+    "你划开的\n不只是泡泡",
+    "鼠标所到\n泡泡开花",
+    "秘密藏在\n泡泡背后",
+    "一点一点\n揭开真相",
+    "泡泡说\n我挡不住你",
+    "划开迷雾\n看见美好",
+    "泡泡虽小\n画面很大",
+    "每一次触碰\n都是一次揭秘",
+    "耐心划完\n会有惊喜",
+    "泡泡碎碎\n画面成成",
+    "你的好奇心\n正在被奖励",
+  ];
+  copyText.textContent = copies[Math.floor(Math.random() * copies.length)];
+
+  /* ── continuous split loop ── */
+  setInterval(() => { if (mouse.on && active) splitNearCursor(); }, 30);
+})();
+</script>
+</body>
+</html>
